@@ -1,0 +1,1684 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Rifa Solidária 2026 — Clube Dachshund Bauru</title>
+<link href="https://fonts.googleapis.com/css2?family=Prompt:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+
+<!-- Firebase -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+  import { getFirestore, collection, doc, setDoc, getDoc, getDocs, updateDoc, onSnapshot, query, orderBy, serverTimestamp, deleteDoc } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+  import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged, createUserWithEmailAndPassword } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+
+  // ===== CONFIGURAÇÃO FIREBASE =====
+  const firebaseConfig = {
+    apiKey: "AIzaSyC98WeC1cpHjO-Iu2J9lcsiUmn0eyjKiwI",
+    authDomain: "rifa-dachshund-bauru.firebaseapp.com",
+    projectId: "rifa-dachshund-bauru",
+    storageBucket: "rifa-dachshund-bauru.firebasestorage.app",
+    messagingSenderId: "71639084487",
+    appId: "1:71639084487:web:e633f267b2f9958c1d7de2"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db = getFirestore(app);
+  const auth = getAuth(app);
+
+  // Estado local
+  let selectedNumbers = new Set();
+  let reservedNumbers = {};
+  let currentUser = null;
+  let isAdmin = false;
+
+  // ===== INICIALIZAÇÃO =====
+  window.addEventListener('DOMContentLoaded', () => {
+    renderGrid();
+    listenToReservations();
+    setupAuthListener();
+    setupEventListeners();
+  });
+
+  // ===== ESCUTA RESERVAS EM TEMPO REAL =====
+  function listenToReservations() {
+    const q = query(collection(db, "reservas"), orderBy("timestamp", "desc"));
+    onSnapshot(q, (snapshot) => {
+      reservedNumbers = {};
+      snapshot.forEach((docSnap) => {
+        const data = docSnap.data();
+        data.numeros.forEach(n => {
+          reservedNumbers[n] = {
+            id: docSnap.id,
+            nome: data.nome,
+            whatsapp: data.whatsapp,
+            comprovante: data.comprovanteConfirmado || false,
+            timestamp: data.timestamp
+          };
+        });
+      });
+      updateGrid();
+      updateStats();
+      if (isAdmin) renderAdminTable();
+    });
+  }
+
+  // ===== GRID =====
+  function renderGrid() {
+    const grid = document.getElementById('numeros-grid');
+    grid.innerHTML = '';
+    for (let i = 1; i <= 100; i++) {
+      const btn = document.createElement('button');
+      btn.className = 'numero-btn disponivel';
+      btn.textContent = String(i).padStart(2, '0');
+      btn.dataset.num = i;
+      btn.addEventListener('click', () => toggleNumber(i, btn));
+      grid.appendChild(btn);
+    }
+  }
+
+  function updateGrid() {
+    document.querySelectorAll('.numero-btn').forEach(btn => {
+      const n = parseInt(btn.dataset.num);
+      btn.classList.remove('disponivel', 'selecionado', 'vendido');
+      if (reservedNumbers[n]) {
+        btn.classList.add('vendido');
+        btn.disabled = true;
+        selectedNumbers.delete(n);
+      } else if (selectedNumbers.has(n)) {
+        btn.classList.add('selecionado');
+        btn.disabled = false;
+      } else {
+        btn.classList.add('disponivel');
+        btn.disabled = false;
+      }
+    });
+    updateSelectionInfo();
+  }
+
+  function toggleNumber(n, btn) {
+    if (reservedNumbers[n]) return;
+    if (selectedNumbers.has(n)) {
+      selectedNumbers.delete(n);
+    } else {
+      selectedNumbers.add(n);
+    }
+    updateGrid();
+  }
+
+  function updateSelectionInfo() {
+    const count = selectedNumbers.size;
+    const total = count * 12;
+    document.getElementById('count-selecionados').textContent = count;
+    document.getElementById('total-selecionados').textContent = `R$ ${total.toFixed(2).replace('.', ',')}`;
+    document.getElementById('btn-reservar').disabled = count === 0;
+
+    // Atualiza no modal também
+    document.getElementById('modal-qtd').textContent = count;
+    document.getElementById('modal-total').textContent = `R$ ${total.toFixed(2).replace('.', ',')}`;
+    document.getElementById('modal-numeros-lista').textContent = Array.from(selectedNumbers).sort((a,b)=>a-b).map(n=>String(n).padStart(2,'0')).join(', ') || '-';
+  }
+
+  function updateStats() {
+    const vendidos = Object.keys(reservedNumbers).length;
+    const disponíveis = 100 - vendidos;
+    const progresso = vendidos;
+
+    document.getElementById('stat-vendidos').textContent = vendidos;
+    document.getElementById('stat-disponiveis').textContent = disponíveis;
+    document.getElementById('progresso-bar').style.width = progresso + '%';
+    document.getElementById('progresso-pct').textContent = progresso + '%';
+  }
+
+  // ===== RESERVA =====
+  function setupEventListeners() {
+    document.getElementById('btn-reservar').addEventListener('click', () => {
+      if (selectedNumbers.size === 0) return;
+      document.getElementById('modal-reserva').classList.add('ativo');
+    });
+
+    document.getElementById('btn-cancelar-modal').addEventListener('click', () => {
+      document.getElementById('modal-reserva').classList.remove('ativo');
+    });
+
+    document.getElementById('btn-confirmar-reserva').addEventListener('click', confirmarReserva);
+
+    document.getElementById('btn-limpar').addEventListener('click', () => {
+      selectedNumbers.clear();
+      updateGrid();
+    });
+
+    document.getElementById('btn-copiar-pix').addEventListener('click', copiarPix);
+    document.getElementById('btn-copiar-pix-modal').addEventListener('click', copiarPix);
+    document.getElementById('btn-copiar-pix-confirmado').addEventListener('click', copiarPix);
+
+    document.getElementById('btn-fechar-confirmado').addEventListener('click', () => {
+      document.getElementById('modal-confirmado').classList.remove('ativo');
+      document.getElementById('modal-reserva').classList.remove('ativo');
+      selectedNumbers.clear();
+      updateGrid();
+    });
+
+    // Admin
+    document.getElementById('btn-login-admin').addEventListener('click', loginAdmin);
+    document.getElementById('btn-logout').addEventListener('click', () => signOut(auth));
+    document.getElementById('btn-abrir-admin').addEventListener('click', () => {
+      document.getElementById('painel-admin').classList.toggle('ativo');
+    });
+
+    // Criar usuário admin
+    document.getElementById('btn-criar-usuario').addEventListener('click', criarUsuario);
+
+    // Enter no login
+    document.getElementById('admin-senha').addEventListener('keydown', e => {
+      if (e.key === 'Enter') loginAdmin();
+    });
+
+    // Modal overlay click
+    document.getElementById('modal-reserva').addEventListener('click', function(e) {
+      if (e.target === this) this.classList.remove('ativo');
+    });
+    document.getElementById('modal-confirmado').addEventListener('click', function(e) {
+      if (e.target === this) this.classList.remove('ativo');
+    });
+  }
+
+  async function confirmarReserva() {
+    const nome = document.getElementById('input-nome').value.trim();
+    const whatsapp = document.getElementById('input-whatsapp').value.trim();
+
+    if (!nome || !whatsapp) {
+      showToast('Preencha nome e WhatsApp!', 'erro');
+      return;
+    }
+    if (selectedNumbers.size === 0) return;
+
+    const btn = document.getElementById('btn-confirmar-reserva');
+    btn.disabled = true;
+    btn.textContent = 'Reservando...';
+
+    try {
+      // Verifica conflito
+      for (let n of selectedNumbers) {
+        if (reservedNumbers[n]) {
+          showToast(`Número ${String(n).padStart(2,'0')} já foi reservado! Atualizando...`, 'erro');
+          updateGrid();
+          btn.disabled = false;
+          btn.textContent = '✓ Confirmar Reserva';
+          return;
+        }
+      }
+
+      const id = `reserva_${Date.now()}_${Math.random().toString(36).substr(2,5)}`;
+      await setDoc(doc(db, "reservas", id), {
+        nome,
+        whatsapp,
+        numeros: Array.from(selectedNumbers),
+        timestamp: serverTimestamp(),
+        comprovanteConfirmado: false
+      });
+
+      document.getElementById('modal-reserva').classList.remove('ativo');
+      document.getElementById('modal-confirmado').classList.add('ativo');
+      document.getElementById('input-nome').value = '';
+      document.getElementById('input-whatsapp').value = '';
+
+    } catch (e) {
+      showToast('Erro ao reservar. Tente novamente.', 'erro');
+      console.error(e);
+    }
+
+    btn.disabled = false;
+    btn.textContent = '✓ Confirmar Reserva';
+  }
+
+  // ===== AUTH =====
+  function setupAuthListener() {
+    onAuthStateChanged(auth, async (user) => {
+      currentUser = user;
+      if (user) {
+        // Verifica se é admin
+        const adminDoc = await getDoc(doc(db, "admins", user.uid));
+        isAdmin = adminDoc.exists();
+        if (isAdmin) {
+          document.getElementById('area-login').classList.add('oculto');
+          document.getElementById('area-logado').classList.remove('oculto');
+          document.getElementById('admin-email-display').textContent = user.email;
+          renderAdminTable();
+        }
+      } else {
+        isAdmin = false;
+        document.getElementById('area-login').classList.remove('oculto');
+        document.getElementById('area-logado').classList.add('oculto');
+        document.getElementById('painel-admin').classList.remove('ativo');
+      }
+    });
+  }
+
+  async function loginAdmin() {
+    const email = document.getElementById('admin-email').value.trim();
+    const senha = document.getElementById('admin-senha').value;
+    if (!email || !senha) { showToast('Preencha email e senha', 'erro'); return; }
+
+    try {
+      await signInWithEmailAndPassword(auth, email, senha);
+    } catch(e) {
+      showToast('Email ou senha incorretos', 'erro');
+    }
+  }
+
+  async function criarUsuario() {
+    const email = document.getElementById('novo-email').value.trim();
+    const senha = document.getElementById('nova-senha').value;
+    if (!email || !senha) { showToast('Preencha email e senha', 'erro'); return; }
+    if (senha.length < 6) { showToast('Senha deve ter mínimo 6 caracteres', 'erro'); return; }
+
+    try {
+      const cred = await createUserWithEmailAndPassword(auth, email, senha);
+      // Registra como admin
+      await setDoc(doc(db, "admins", cred.user.uid), { email, criadoEm: serverTimestamp() });
+      showToast('Usuário criado com sucesso!', 'ok');
+      document.getElementById('novo-email').value = '';
+      document.getElementById('nova-senha').value = '';
+      document.getElementById('form-criar-usuario').classList.add('oculto');
+    } catch(e) {
+      if (e.code === 'auth/email-already-in-use') showToast('Email já cadastrado', 'erro');
+      else showToast('Erro ao criar usuário: ' + e.message, 'erro');
+    }
+  }
+
+  // ===== PAINEL ADMIN =====
+  function renderAdminTable() {
+    const tbody = document.getElementById('admin-tbody');
+    const entries = [];
+
+    // Agrupa por reserva
+    const reservaMap = {};
+    Object.entries(reservedNumbers).forEach(([num, info]) => {
+      const key = info.id;
+      if (!reservaMap[key]) {
+        reservaMap[key] = {
+          id: key,
+          nome: info.nome,
+          whatsapp: info.whatsapp,
+          comprovante: info.comprovante,
+          numeros: [],
+          timestamp: info.timestamp
+        };
+      }
+      reservaMap[key].numeros.push(parseInt(num));
+    });
+
+    const lista = Object.values(reservaMap).sort((a, b) => {
+      if (!a.timestamp) return 1;
+      if (!b.timestamp) return -1;
+      return b.timestamp.seconds - a.timestamp.seconds;
+    });
+
+    tbody.innerHTML = '';
+    if (lista.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:2rem;opacity:.5">Nenhuma reserva ainda</td></tr>';
+      return;
+    }
+
+    lista.forEach(r => {
+      const tr = document.createElement('tr');
+      const nums = r.numeros.sort((a,b)=>a-b).map(n=>String(n).padStart(2,'0')).join(', ');
+      const total = `R$ ${(r.numeros.length * 12).toFixed(2).replace('.','.')}`;
+      const data = r.timestamp ? new Date(r.timestamp.seconds * 1000).toLocaleString('pt-BR') : '-';
+
+      tr.innerHTML = `
+        <td><span class="badge-num">${nums}</span></td>
+        <td><strong>${r.nome}</strong></td>
+        <td><a href="https://wa.me/55${r.whatsapp.replace(/\D/g,'')}" target="_blank" class="wapp-link">📲 ${r.whatsapp}</a></td>
+        <td>${total}</td>
+        <td>${data}</td>
+        <td>
+          <label class="switch-comprovante" title="${r.comprovante ? 'Comprovante confirmado' : 'Aguardando comprovante'}">
+            <input type="checkbox" ${r.comprovante ? 'checked' : ''} onchange="window.toggleComprovante('${r.id}', this.checked)">
+            <span class="switch-slider"></span>
+          </label>
+        </td>
+        <td>
+          <button class="btn-excluir" onclick="window.excluirReserva('${r.id}', '${r.nome.replace(/'/g,"\\'")}')">🗑</button>
+        </td>
+      `;
+      tbody.appendChild(tr);
+    });
+
+    // Atualiza contador admin
+    document.getElementById('admin-stat-total').textContent = lista.length;
+    document.getElementById('admin-stat-confirmados').textContent = lista.filter(r => r.comprovante).length;
+    document.getElementById('admin-stat-pendentes').textContent = lista.filter(r => !r.comprovante).length;
+  }
+
+  window.toggleComprovante = async (reservaId, confirmado) => {
+    try {
+      await updateDoc(doc(db, "reservas", reservaId), { comprovanteConfirmado: confirmado });
+      showToast(confirmado ? '✓ Comprovante confirmado!' : 'Comprovante desmarcado', confirmado ? 'ok' : 'aviso');
+    } catch(e) {
+      showToast('Erro ao atualizar', 'erro');
+    }
+  };
+
+  window.excluirReserva = async (reservaId, nome) => {
+    if (!confirm(`Excluir reserva de ${nome}? Isso liberará os números.`)) return;
+    try {
+      await deleteDoc(doc(db, "reservas", reservaId));
+      showToast('Reserva excluída', 'aviso');
+    } catch(e) {
+      showToast('Erro ao excluir', 'erro');
+    }
+  };
+
+  // Exportar CSV
+  window.exportarCSV = () => {
+    const reservaMap = {};
+    Object.entries(reservedNumbers).forEach(([num, info]) => {
+      const key = info.id;
+      if (!reservaMap[key]) {
+        reservaMap[key] = { id: key, nome: info.nome, whatsapp: info.whatsapp, comprovante: info.comprovante, numeros: [], timestamp: info.timestamp };
+      }
+      reservaMap[key].numeros.push(parseInt(num));
+    });
+
+    let csv = 'Nome,WhatsApp,Números,Total (R$),Comprovante,Data\n';
+    Object.values(reservaMap).forEach(r => {
+      const nums = r.numeros.sort((a,b)=>a-b).join(' - ');
+      const total = (r.numeros.length * 12).toFixed(2);
+      const data = r.timestamp ? new Date(r.timestamp.seconds * 1000).toLocaleString('pt-BR') : '-';
+      csv += `"${r.nome}","${r.whatsapp}","${nums}","${total}","${r.comprovante ? 'Sim' : 'Não'}","${data}"\n`;
+    });
+
+    const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'rifa_clube_dachshund.csv';
+    a.click();
+  };
+
+  // ===== PIX =====
+  function copiarPix() {
+    navigator.clipboard.writeText('48136936870').then(() => {
+      showToast('Chave Pix copiada! 🐾', 'ok');
+    });
+  }
+
+  // ===== TOAST =====
+  function showToast(msg, tipo = 'ok') {
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.className = 'toast ativo ' + tipo;
+    setTimeout(() => t.classList.remove('ativo'), 3500);
+  }
+</script>
+
+<style>
+:root {
+  --marrom-escuro: #56231e;
+  --marrom-medio: #65311e;
+  --marrom-claro: #76422d;
+  --verde: #2d7159;
+  --roxo: #392676;
+  --dourado: #e0ad39;
+  --preto: #141414;
+  --bege-escuro: #e2cbb2;
+  --bege-medio: #f1dec9;
+  --bege-claro: #f8eddf;
+
+  --fonte: 'Prompt', sans-serif;
+  --raio: 12px;
+  --raio-lg: 20px;
+  --sombra: 0 4px 24px rgba(56,23,14,.15);
+  --sombra-lg: 0 8px 48px rgba(56,23,14,.22);
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: var(--fonte);
+  background: var(--bege-claro);
+  color: var(--preto);
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+/* ===== HEADER ===== */
+.header {
+  background: var(--marrom-escuro);
+  background-image: 
+    radial-gradient(ellipse at 10% 50%, rgba(101,49,30,.8) 0%, transparent 60%),
+    radial-gradient(ellipse at 90% 20%, rgba(57,38,118,.4) 0%, transparent 50%);
+  padding: 2.5rem 1.5rem 2rem;
+  text-align: center;
+  position: relative;
+  overflow: hidden;
+}
+
+.header::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(
+    45deg, transparent, transparent 40px,
+    rgba(224,173,57,.03) 40px, rgba(224,173,57,.03) 80px
+  );
+}
+
+.header-pata {
+  font-size: 2.5rem;
+  margin-bottom: .5rem;
+  animation: float 3s ease-in-out infinite;
+}
+
+@keyframes float {
+  0%,100% { transform: translateY(0); }
+  50% { transform: translateY(-6px); }
+}
+
+.header h1 {
+  font-size: clamp(1.3rem, 4vw, 2rem);
+  font-weight: 800;
+  color: var(--bege-claro);
+  letter-spacing: -.02em;
+  line-height: 1.1;
+}
+
+.header h2 {
+  font-size: clamp(.85rem, 2.5vw, 1rem);
+  font-weight: 400;
+  color: var(--dourado);
+  margin-top: .4rem;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.header-sub {
+  font-size: .85rem;
+  color: var(--bege-escuro);
+  margin-top: .8rem;
+  opacity: .8;
+  max-width: 500px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/* ===== STATS BAR ===== */
+.stats-bar {
+  background: var(--dourado);
+  padding: 1rem 1.5rem;
+  display: flex;
+  justify-content: center;
+  gap: 2.5rem;
+  flex-wrap: wrap;
+}
+
+.stat-item {
+  text-align: center;
+}
+
+.stat-num {
+  font-size: 1.6rem;
+  font-weight: 800;
+  color: var(--marrom-escuro);
+  line-height: 1;
+}
+
+.stat-label {
+  font-size: .7rem;
+  font-weight: 600;
+  color: var(--marrom-medio);
+  text-transform: uppercase;
+  letter-spacing: .07em;
+}
+
+/* ===== PROGRESSO ===== */
+.progresso-wrap {
+  background: var(--marrom-escuro);
+  padding: .5rem 1.5rem .7rem;
+}
+
+.progresso-track {
+  background: rgba(255,255,255,.15);
+  border-radius: 99px;
+  height: 8px;
+  overflow: hidden;
+}
+
+.progresso-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--dourado), #f5c842);
+  border-radius: 99px;
+  transition: width .6s cubic-bezier(.4,0,.2,1);
+  width: 0%;
+}
+
+.progresso-info {
+  display: flex;
+  justify-content: space-between;
+  color: var(--bege-escuro);
+  font-size: .75rem;
+  margin-top: .3rem;
+  opacity: .7;
+}
+
+/* ===== PIX CARD ===== */
+.pix-card {
+  margin: 1.5rem 1rem 0;
+  background: linear-gradient(135deg, var(--verde), #235a46);
+  border-radius: var(--raio-lg);
+  padding: 1.2rem 1.5rem;
+  color: white;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  box-shadow: var(--sombra);
+}
+
+.pix-icon { font-size: 2rem; flex-shrink: 0; }
+
+.pix-info { flex: 1; min-width: 0; }
+
+.pix-titulo {
+  font-size: .7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .1em;
+  opacity: .8;
+  margin-bottom: .2rem;
+}
+
+.pix-chave {
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: .03em;
+}
+
+.pix-nome {
+  font-size: .78rem;
+  opacity: .8;
+  margin-top: .15rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.btn-pix {
+  background: rgba(255,255,255,.2);
+  border: 1px solid rgba(255,255,255,.35);
+  color: white;
+  padding: .55rem 1rem;
+  border-radius: 8px;
+  font-family: var(--fonte);
+  font-size: .78rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background .2s;
+  flex-shrink: 0;
+}
+
+.btn-pix:hover { background: rgba(255,255,255,.3); }
+
+/* ===== AVISO PIX ===== */
+.aviso-pix {
+  margin: 1rem 1rem 0;
+  background: linear-gradient(135deg, #7b3a00, #a05000);
+  border-radius: var(--raio);
+  padding: 1rem 1.2rem;
+  display: flex;
+  gap: .8rem;
+  align-items: flex-start;
+}
+
+.aviso-pix-icon { font-size: 1.4rem; flex-shrink: 0; margin-top: .1rem; }
+
+.aviso-pix-texto {
+  color: var(--bege-claro);
+  font-size: .82rem;
+  line-height: 1.5;
+}
+
+.aviso-pix-texto strong {
+  display: block;
+  font-size: .9rem;
+  margin-bottom: .2rem;
+  color: var(--dourado);
+}
+
+/* ===== PRÊMIOS ===== */
+.premios-section {
+  margin: 1.5rem 1rem 0;
+}
+
+.section-title {
+  font-size: .7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .12em;
+  color: var(--marrom-claro);
+  margin-bottom: .8rem;
+  padding-left: .2rem;
+}
+
+.premios-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: .7rem;
+}
+
+.premio-card {
+  background: white;
+  border-radius: var(--raio);
+  padding: 1rem;
+  box-shadow: 0 2px 12px rgba(56,23,14,.08);
+  border: 1px solid rgba(56,23,14,.06);
+}
+
+.premio-emoji { font-size: 1.8rem; margin-bottom: .4rem; }
+
+.premio-nome {
+  font-size: .82rem;
+  font-weight: 700;
+  color: var(--marrom-escuro);
+  line-height: 1.2;
+}
+
+.premio-desc {
+  font-size: .72rem;
+  color: var(--marrom-claro);
+  margin-top: .25rem;
+  line-height: 1.3;
+}
+
+/* ===== ESCOLHA NÚMEROS ===== */
+.escolha-section {
+  margin: 1.5rem 1rem 0;
+}
+
+.escolha-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: .8rem;
+}
+
+.legenda {
+  display: flex;
+  gap: .8rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+}
+
+.leg-item {
+  display: flex;
+  align-items: center;
+  gap: .3rem;
+  font-size: .72rem;
+  color: var(--marrom-claro);
+}
+
+.leg-dot {
+  width: 12px; height: 12px;
+  border-radius: 3px;
+}
+.leg-dot.disponivel { background: white; border: 1.5px solid var(--bege-escuro); }
+.leg-dot.selecionado { background: var(--dourado); }
+.leg-dot.vendido { background: var(--marrom-escuro); }
+
+/* GRID */
+#numeros-grid {
+  display: grid;
+  grid-template-columns: repeat(10, 1fr);
+  gap: 5px;
+}
+
+@media (max-width: 380px) {
+  #numeros-grid { grid-template-columns: repeat(8, 1fr); gap: 4px; }
+}
+
+.numero-btn {
+  aspect-ratio: 1;
+  border-radius: 7px;
+  border: none;
+  font-family: var(--fonte);
+  font-size: clamp(.6rem, 2.5vw, .78rem);
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform .12s, background .15s, box-shadow .15s;
+  position: relative;
+  outline: none;
+}
+
+.numero-btn:active { transform: scale(.92); }
+
+.numero-btn.disponivel {
+  background: white;
+  color: var(--marrom-escuro);
+  border: 1.5px solid var(--bege-escuro);
+  box-shadow: 0 1px 4px rgba(56,23,14,.06);
+}
+
+.numero-btn.disponivel:hover {
+  background: var(--bege-medio);
+  border-color: var(--dourado);
+  transform: scale(1.08);
+  box-shadow: 0 3px 10px rgba(224,173,57,.25);
+  z-index: 1;
+}
+
+.numero-btn.selecionado {
+  background: var(--dourado);
+  color: var(--marrom-escuro);
+  border: 2px solid #c9911a;
+  box-shadow: 0 3px 12px rgba(224,173,57,.4);
+  transform: scale(1.06);
+  z-index: 1;
+}
+
+.numero-btn.vendido {
+  background: var(--marrom-escuro);
+  color: rgba(248,237,223,.4);
+  cursor: not-allowed;
+  border: 1.5px solid transparent;
+}
+
+/* ===== BARRA SELEÇÃO ===== */
+.selecao-bar {
+  position: sticky;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: white;
+  border-top: 2px solid var(--bege-escuro);
+  padding: .8rem 1rem;
+  display: flex;
+  align-items: center;
+  gap: .8rem;
+  box-shadow: 0 -4px 20px rgba(56,23,14,.12);
+  z-index: 100;
+  margin-top: 1.5rem;
+}
+
+.selecao-info { flex: 1; }
+
+.selecao-count {
+  font-size: .72rem;
+  color: var(--marrom-claro);
+  font-weight: 500;
+}
+
+.selecao-total {
+  font-size: 1.1rem;
+  font-weight: 800;
+  color: var(--marrom-escuro);
+  line-height: 1;
+}
+
+.btn-limpar {
+  background: none;
+  border: 1.5px solid var(--bege-escuro);
+  color: var(--marrom-claro);
+  padding: .55rem .9rem;
+  border-radius: 8px;
+  font-family: var(--fonte);
+  font-size: .78rem;
+  cursor: pointer;
+  transition: .2s;
+}
+
+.btn-limpar:hover { border-color: var(--marrom-claro); }
+
+.btn-reservar {
+  background: var(--marrom-escuro);
+  color: var(--bege-claro);
+  border: none;
+  padding: .65rem 1.2rem;
+  border-radius: 8px;
+  font-family: var(--fonte);
+  font-size: .85rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: .2s;
+  white-space: nowrap;
+}
+
+.btn-reservar:hover:not(:disabled) {
+  background: var(--marrom-medio);
+  transform: translateY(-1px);
+}
+
+.btn-reservar:disabled {
+  opacity: .4;
+  cursor: not-allowed;
+}
+
+/* ===== MODAL ===== */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(20,20,20,.65);
+  backdrop-filter: blur(4px);
+  z-index: 200;
+  display: none;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 1rem;
+}
+
+.modal-overlay.ativo { display: flex; }
+
+@media (min-width: 500px) {
+  .modal-overlay { align-items: center; }
+}
+
+.modal-box {
+  background: var(--bege-claro);
+  border-radius: var(--raio-lg) var(--raio-lg) 0 0;
+  width: 100%;
+  max-width: 480px;
+  padding: 1.5rem;
+  animation: slideUp .3s cubic-bezier(.4,0,.2,1);
+}
+
+@media (min-width: 500px) {
+  .modal-box { border-radius: var(--raio-lg); }
+}
+
+@keyframes slideUp {
+  from { transform: translateY(100%); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+.modal-handle {
+  width: 36px; height: 4px;
+  background: var(--bege-escuro);
+  border-radius: 99px;
+  margin: 0 auto 1.2rem;
+}
+
+@media (min-width: 500px) { .modal-handle { display: none; } }
+
+.modal-title {
+  font-size: 1.1rem;
+  font-weight: 800;
+  color: var(--marrom-escuro);
+  margin-bottom: .3rem;
+}
+
+.modal-resumo {
+  background: white;
+  border-radius: var(--raio);
+  padding: .9rem 1rem;
+  margin-bottom: 1rem;
+  font-size: .82rem;
+}
+
+.modal-resumo-linha {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: .25rem;
+  color: var(--marrom-claro);
+}
+
+.modal-resumo-linha strong {
+  color: var(--marrom-escuro);
+  font-weight: 700;
+}
+
+.modal-resumo-total {
+  border-top: 1px solid var(--bege-escuro);
+  padding-top: .5rem;
+  margin-top: .4rem;
+  font-size: 1rem;
+  font-weight: 800;
+  color: var(--marrom-escuro);
+}
+
+.aviso-obrigatorio {
+  background: linear-gradient(135deg, rgba(224,173,57,.2), rgba(224,173,57,.1));
+  border: 1.5px solid var(--dourado);
+  border-radius: var(--raio);
+  padding: .9rem 1rem;
+  margin-bottom: 1rem;
+  font-size: .8rem;
+  color: var(--marrom-escuro);
+  line-height: 1.5;
+}
+
+.aviso-obrigatorio strong {
+  display: block;
+  font-size: .85rem;
+  margin-bottom: .3rem;
+  color: #7a5800;
+}
+
+label.form-label {
+  display: block;
+  font-size: .75rem;
+  font-weight: 700;
+  color: var(--marrom-claro);
+  text-transform: uppercase;
+  letter-spacing: .07em;
+  margin-bottom: .35rem;
+  margin-top: .8rem;
+}
+
+input.form-input {
+  width: 100%;
+  background: white;
+  border: 1.5px solid var(--bege-escuro);
+  border-radius: 8px;
+  padding: .7rem .9rem;
+  font-family: var(--fonte);
+  font-size: .9rem;
+  color: var(--preto);
+  outline: none;
+  transition: border-color .2s;
+}
+
+input.form-input:focus { border-color: var(--marrom-escuro); }
+
+.modal-btns {
+  display: flex;
+  gap: .7rem;
+  margin-top: 1.2rem;
+}
+
+.btn-confirmar {
+  flex: 1;
+  background: var(--marrom-escuro);
+  color: var(--bege-claro);
+  border: none;
+  padding: .8rem;
+  border-radius: 10px;
+  font-family: var(--fonte);
+  font-size: .9rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: .2s;
+}
+
+.btn-confirmar:hover { background: var(--marrom-medio); }
+.btn-confirmar:disabled { opacity: .5; cursor: not-allowed; }
+
+.btn-cancelar {
+  background: none;
+  border: 1.5px solid var(--bege-escuro);
+  color: var(--marrom-claro);
+  padding: .8rem 1rem;
+  border-radius: 10px;
+  font-family: var(--fonte);
+  font-size: .85rem;
+  cursor: pointer;
+}
+
+/* Modal Confirmado */
+.modal-confirmado-box {
+  background: var(--bege-claro);
+  border-radius: var(--raio-lg) var(--raio-lg) 0 0;
+  width: 100%;
+  max-width: 400px;
+  padding: 2rem 1.5rem;
+  text-align: center;
+  animation: slideUp .3s cubic-bezier(.4,0,.2,1);
+}
+
+@media (min-width: 500px) { .modal-confirmado-box { border-radius: var(--raio-lg); } }
+
+.confirmado-icone { font-size: 3.5rem; margin-bottom: .8rem; }
+
+.confirmado-titulo {
+  font-size: 1.3rem;
+  font-weight: 800;
+  color: var(--marrom-escuro);
+  margin-bottom: .5rem;
+}
+
+.confirmado-texto {
+  font-size: .85rem;
+  color: var(--marrom-claro);
+  line-height: 1.5;
+  margin-bottom: 1rem;
+}
+
+.confirmado-pix {
+  background: linear-gradient(135deg, var(--verde), #235a46);
+  color: white;
+  border-radius: var(--raio);
+  padding: 1rem;
+  margin-bottom: 1.2rem;
+}
+
+.confirmado-pix p {
+  font-size: .75rem;
+  opacity: .8;
+  margin-bottom: .3rem;
+}
+
+.confirmado-pix strong {
+  font-size: 1rem;
+  display: block;
+}
+
+.btn-fechar-confirmado {
+  width: 100%;
+  background: var(--marrom-escuro);
+  color: var(--bege-claro);
+  border: none;
+  padding: .85rem;
+  border-radius: 10px;
+  font-family: var(--fonte);
+  font-size: .9rem;
+  font-weight: 700;
+  cursor: pointer;
+  margin-top: .3rem;
+}
+
+/* ===== ADMIN ===== */
+.admin-section {
+  margin: 2rem 1rem 1rem;
+  border-top: 1px solid var(--bege-escuro);
+  padding-top: 1.5rem;
+}
+
+.admin-toggle-btn {
+  background: none;
+  border: 1.5px solid var(--bege-escuro);
+  color: var(--marrom-claro);
+  padding: .5rem 1rem;
+  border-radius: 8px;
+  font-family: var(--fonte);
+  font-size: .78rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: .4rem;
+  transition: .2s;
+}
+
+.admin-toggle-btn:hover { border-color: var(--marrom-claro); color: var(--marrom-escuro); }
+
+.painel-admin {
+  display: none;
+  margin-top: 1rem;
+}
+
+.painel-admin.ativo { display: block; }
+
+/* Login */
+.login-card {
+  background: white;
+  border-radius: var(--raio-lg);
+  padding: 1.5rem;
+  box-shadow: var(--sombra);
+  max-width: 400px;
+}
+
+.login-card h3 {
+  font-size: 1rem;
+  font-weight: 800;
+  color: var(--marrom-escuro);
+  margin-bottom: 1rem;
+}
+
+.btn-entrar {
+  width: 100%;
+  background: var(--marrom-escuro);
+  color: var(--bege-claro);
+  border: none;
+  padding: .75rem;
+  border-radius: 8px;
+  font-family: var(--fonte);
+  font-size: .9rem;
+  font-weight: 700;
+  cursor: pointer;
+  margin-top: 1rem;
+  transition: .2s;
+}
+
+.btn-entrar:hover { background: var(--marrom-medio); }
+
+/* Painel logado */
+.oculto { display: none !important; }
+
+.painel-logado {
+  background: white;
+  border-radius: var(--raio-lg);
+  padding: 1.5rem;
+  box-shadow: var(--sombra);
+}
+
+.painel-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1.2rem;
+  flex-wrap: wrap;
+  gap: .5rem;
+}
+
+.painel-top h3 {
+  font-size: 1rem;
+  font-weight: 800;
+  color: var(--marrom-escuro);
+}
+
+.painel-email {
+  font-size: .75rem;
+  color: var(--marrom-claro);
+}
+
+.btn-sair {
+  background: none;
+  border: 1.5px solid var(--bege-escuro);
+  color: var(--marrom-claro);
+  padding: .4rem .8rem;
+  border-radius: 6px;
+  font-family: var(--fonte);
+  font-size: .75rem;
+  cursor: pointer;
+}
+
+/* Stats admin */
+.admin-stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: .7rem;
+  margin-bottom: 1.2rem;
+}
+
+.admin-stat-card {
+  background: var(--bege-claro);
+  border-radius: var(--raio);
+  padding: .8rem;
+  text-align: center;
+}
+
+.admin-stat-card .num {
+  font-size: 1.5rem;
+  font-weight: 800;
+  color: var(--marrom-escuro);
+}
+
+.admin-stat-card .lbl {
+  font-size: .65rem;
+  font-weight: 600;
+  color: var(--marrom-claro);
+  text-transform: uppercase;
+  letter-spacing: .05em;
+}
+
+/* Criar usuário */
+.criar-usuario-section {
+  background: var(--bege-claro);
+  border-radius: var(--raio);
+  padding: 1rem;
+  margin-bottom: 1.2rem;
+}
+
+.criar-usuario-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  cursor: pointer;
+}
+
+.criar-usuario-header h4 {
+  font-size: .82rem;
+  font-weight: 700;
+  color: var(--marrom-escuro);
+}
+
+#form-criar-usuario { margin-top: .8rem; }
+#form-criar-usuario.oculto { display: none; }
+
+.btn-criar {
+  background: var(--roxo);
+  color: white;
+  border: none;
+  padding: .6rem 1rem;
+  border-radius: 7px;
+  font-family: var(--fonte);
+  font-size: .8rem;
+  font-weight: 700;
+  cursor: pointer;
+  margin-top: .7rem;
+}
+
+/* Tabela */
+.table-wrap {
+  overflow-x: auto;
+  border-radius: var(--raio);
+  border: 1px solid var(--bege-escuro);
+}
+
+.admin-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: .78rem;
+  min-width: 620px;
+}
+
+.admin-table th {
+  background: var(--marrom-escuro);
+  color: var(--bege-claro);
+  padding: .65rem .8rem;
+  text-align: left;
+  font-weight: 600;
+  font-size: .7rem;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+}
+
+.admin-table td {
+  padding: .65rem .8rem;
+  border-bottom: 1px solid var(--bege-escuro);
+  vertical-align: middle;
+}
+
+.admin-table tr:last-child td { border-bottom: none; }
+
+.admin-table tr:hover td { background: rgba(248,237,223,.6); }
+
+.badge-num {
+  background: var(--bege-medio);
+  color: var(--marrom-escuro);
+  padding: .2rem .5rem;
+  border-radius: 5px;
+  font-weight: 700;
+  font-size: .75rem;
+}
+
+.wapp-link {
+  color: var(--verde);
+  text-decoration: none;
+  font-weight: 600;
+}
+
+/* Switch comprovante */
+.switch-comprovante {
+  position: relative;
+  display: inline-block;
+  width: 40px;
+  height: 22px;
+  cursor: pointer;
+}
+
+.switch-comprovante input { opacity: 0; width: 0; height: 0; }
+
+.switch-slider {
+  position: absolute;
+  inset: 0;
+  background: var(--bege-escuro);
+  border-radius: 99px;
+  transition: .3s;
+}
+
+.switch-slider::before {
+  content: '';
+  position: absolute;
+  width: 16px; height: 16px;
+  left: 3px; bottom: 3px;
+  background: white;
+  border-radius: 50%;
+  transition: .3s;
+  box-shadow: 0 1px 3px rgba(0,0,0,.2);
+}
+
+.switch-comprovante input:checked + .switch-slider { background: var(--verde); }
+.switch-comprovante input:checked + .switch-slider::before { transform: translateX(18px); }
+
+.btn-excluir {
+  background: none;
+  border: 1.5px solid #ffdddd;
+  color: #cc4444;
+  padding: .3rem .5rem;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: .85rem;
+  transition: .2s;
+}
+
+.btn-excluir:hover { background: #fff0f0; }
+
+.btn-exportar {
+  background: var(--verde);
+  color: white;
+  border: none;
+  padding: .55rem 1rem;
+  border-radius: 7px;
+  font-family: var(--fonte);
+  font-size: .78rem;
+  font-weight: 700;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: .4rem;
+  transition: .2s;
+}
+
+.btn-exportar:hover { background: #235a46; }
+
+.table-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: .7rem;
+}
+
+/* ===== TOAST ===== */
+.toast {
+  position: fixed;
+  bottom: 80px;
+  left: 50%;
+  transform: translateX(-50%) translateY(20px);
+  background: var(--preto);
+  color: white;
+  padding: .7rem 1.3rem;
+  border-radius: 99px;
+  font-size: .82rem;
+  font-weight: 600;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .3s, transform .3s;
+  z-index: 999;
+  white-space: nowrap;
+  box-shadow: var(--sombra-lg);
+}
+
+.toast.ativo {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+.toast.ok { background: var(--verde); }
+.toast.erro { background: #cc2200; }
+.toast.aviso { background: var(--marrom-escuro); }
+
+/* ===== FOOTER ===== */
+.footer {
+  margin: 2rem 1rem 5rem;
+  text-align: center;
+  font-size: .72rem;
+  color: var(--marrom-claro);
+  opacity: .6;
+}
+
+.footer a { color: inherit; }
+
+/* ===== RESPONSIVE ===== */
+@media (max-width: 360px) {
+  .pix-card { flex-wrap: wrap; }
+  .btn-pix { width: 100%; text-align: center; }
+  .admin-stats { grid-template-columns: repeat(3,1fr); }
+}
+</style>
+</head>
+<body>
+
+<!-- HEADER -->
+<header class="header">
+  <div class="header-pata">🐾</div>
+  <h1>Rifa Solidária 2026</h1>
+  <h2>Clube Dachshund Bauru</h2>
+  <p class="header-sub">Participe e ajude na confraternização do clube! Cada número é uma chance de fazer a diferença.</p>
+</header>
+
+<!-- STATS -->
+<div class="stats-bar">
+  <div class="stat-item">
+    <div class="stat-num" id="stat-vendidos">0</div>
+    <div class="stat-label">Vendidos</div>
+  </div>
+  <div class="stat-item">
+    <div class="stat-num" id="stat-disponiveis">100</div>
+    <div class="stat-label">Disponíveis</div>
+  </div>
+  <div class="stat-item">
+    <div class="stat-num">100</div>
+    <div class="stat-label">Total</div>
+  </div>
+  <div class="stat-item">
+    <div class="stat-num">R$12</div>
+    <div class="stat-label">Por número</div>
+  </div>
+</div>
+
+<!-- PROGRESSO -->
+<div class="progresso-wrap">
+  <div class="progresso-track">
+    <div class="progresso-fill" id="progresso-bar"></div>
+  </div>
+  <div class="progresso-info">
+    <span>Progresso da venda</span>
+    <span id="progresso-pct">0%</span>
+  </div>
+</div>
+
+<!-- PIX -->
+<div class="pix-card">
+  <div class="pix-icon">💸</div>
+  <div class="pix-info">
+    <div class="pix-titulo">Chave Pix para pagamento</div>
+    <div class="pix-chave">48136936870</div>
+    <div class="pix-nome">CPF · Ana Carolina Moreno Valverde · Bradesco</div>
+  </div>
+  <button class="btn-pix" id="btn-copiar-pix">📋 Copiar</button>
+</div>
+
+<!-- AVISO IMPORTANTE -->
+<div class="aviso-pix">
+  <div class="aviso-pix-icon">⚠️</div>
+  <div class="aviso-pix-texto">
+    <strong>Envio do comprovante é obrigatório!</strong>
+    Após reservar seu(s) número(s), você <strong>deve</strong> enviar o comprovante do Pix via WhatsApp para a Carol: <strong>(14) 99754-6986</strong>. Sem o comprovante, a reserva poderá ser cancelada.<br><br><a href="https://wa.me/5514997546986" target="_blank" style="display:inline-block;margin-top:.4rem;background:rgba(255,255,255,.2);color:var(--bege-claro);padding:.4rem .9rem;border-radius:6px;font-weight:700;font-size:.8rem;text-decoration:none;">📲 Abrir WhatsApp da Carol</a>
+  </div>
+</div>
+
+<!-- PRÊMIOS -->
+<div class="premios-section">
+  <div class="section-title">🏆 Prêmios do sorteio</div>
+  <div class="premios-grid">
+    <div class="premio-card">
+      <div class="premio-emoji">🛁</div>
+      <div class="premio-nome">Banho completo</div>
+      <div class="premio-desc">Banho e tosa completo no petshop Auforno</div>
+    </div>
+    <div class="premio-card">
+      <div class="premio-emoji">🦴</div>
+      <div class="premio-nome">Petiscos naturais</div>
+      <div class="premio-desc">Kit saudável — Ganabio & Cacaupet</div>
+    </div>
+    <div class="premio-card">
+      <div class="premio-emoji">🐶</div>
+      <div class="premio-nome">Day use</div>
+      <div class="premio-desc">Um dia inteiro na Creche Bom pra Cachorro</div>
+    </div>
+  </div>
+</div>
+
+<!-- ESCOLHA NÚMEROS -->
+<div class="escolha-section">
+  <div class="escolha-header">
+    <div class="section-title" style="margin-bottom:0">Escolha seu(s) número(s)</div>
+  </div>
+
+  <div class="legenda">
+    <div class="leg-item"><div class="leg-dot disponivel"></div> Disponível</div>
+    <div class="leg-item"><div class="leg-dot selecionado"></div> Selecionado</div>
+    <div class="leg-item"><div class="leg-dot vendido"></div> Reservado</div>
+  </div>
+
+  <div id="numeros-grid"></div>
+</div>
+
+<!-- BARRA SELEÇÃO -->
+<div class="selecao-bar">
+  <div class="selecao-info">
+    <div class="selecao-count"><span id="count-selecionados">0</span> número(s) selecionado(s)</div>
+    <div class="selecao-total" id="total-selecionados">R$ 0,00</div>
+  </div>
+  <button class="btn-limpar" id="btn-limpar">Limpar</button>
+  <button class="btn-reservar" id="btn-reservar" disabled>Reservar ✓</button>
+</div>
+
+<!-- MODAL RESERVA -->
+<div class="modal-overlay" id="modal-reserva">
+  <div class="modal-box">
+    <div class="modal-handle"></div>
+    <div class="modal-title">🐾 Reservar números</div>
+
+    <div class="modal-resumo" style="margin-top:.8rem">
+      <div class="modal-resumo-linha">
+        <span>Números</span>
+        <strong id="modal-numeros-lista">-</strong>
+      </div>
+      <div class="modal-resumo-linha">
+        <span>Quantidade</span>
+        <strong><span id="modal-qtd">0</span> número(s)</strong>
+      </div>
+      <div class="modal-resumo-linha modal-resumo-total">
+        <span>Total a pagar</span>
+        <strong id="modal-total">R$ 0,00</strong>
+      </div>
+    </div>
+
+    <div class="aviso-obrigatorio">
+      <strong>⚠️ Atenção — Envio do comprovante obrigatório!</strong>
+      Após confirmar, copie a chave Pix e envie o comprovante de pagamento via WhatsApp para a Carol: <strong>(14) 99754-6986</strong>. A participação só é confirmada com o comprovante.
+    </div>
+
+    <label class="form-label" for="input-nome">Nome completo *</label>
+    <input type="text" id="input-nome" class="form-input" placeholder="Seu nome completo" autocomplete="name">
+
+    <label class="form-label" for="input-whatsapp">WhatsApp *</label>
+    <input type="tel" id="input-whatsapp" class="form-input" placeholder="(14) 99999-9999" autocomplete="tel">
+
+    <div style="margin-top:1rem;padding:.9rem;background:var(--bege-medio);border-radius:var(--raio);font-size:.8rem;color:var(--marrom-escuro);">
+      💸 Chave Pix: <strong>48136936870</strong>
+      <button class="btn-pix" id="btn-copiar-pix-modal" style="margin-top:.5rem;width:100%;text-align:center;background:var(--verde);">📋 Copiar chave Pix</button>
+    </div>
+
+    <div class="modal-btns">
+      <button class="btn-cancelar" id="btn-cancelar-modal">Cancelar</button>
+      <button class="btn-confirmar" id="btn-confirmar-reserva">✓ Confirmar Reserva</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL CONFIRMADO -->
+<div class="modal-overlay" id="modal-confirmado">
+  <div class="modal-confirmado-box">
+    <div class="confirmado-icone">🎉</div>
+    <div class="confirmado-titulo">Reserva confirmada!</div>
+    <div class="confirmado-texto">
+      Seus números foram reservados. Agora envie o comprovante Pix para a Carol via WhatsApp para confirmar sua participação!<br><br><a href="https://wa.me/5514997546986" target="_blank" style="display:block;margin-top:.5rem;background:var(--verde);color:white;padding:.55rem;border-radius:8px;font-weight:700;font-size:.82rem;text-decoration:none;">📲 (14) 99754-6986 — WhatsApp da Carol</a>
+    </div>
+    <div class="confirmado-pix">
+      <p>Chave Pix — CPF · Ana Carolina Moreno Valverde · Bradesco</p>
+      <strong>48136936870</strong>
+    </div>
+    <button class="btn-pix" id="btn-copiar-pix-confirmado" style="width:100%;text-align:center;background:var(--verde);margin-bottom:.7rem;padding:.65rem;border-radius:8px;">📋 Copiar chave Pix</button>
+    <button class="btn-fechar-confirmado" id="btn-fechar-confirmado">Entendido! 🐾</button>
+  </div>
+</div>
+
+<!-- ADMIN -->
+<div class="admin-section">
+  <button class="admin-toggle-btn" id="btn-abrir-admin">🔒 Área administrativa</button>
+
+  <div class="painel-admin" id="painel-admin">
+
+    <!-- Login -->
+    <div id="area-login">
+      <div class="login-card">
+        <h3>🔐 Acesso administrativo</h3>
+        <label class="form-label" for="admin-email">E-mail</label>
+        <input type="email" id="admin-email" class="form-input" placeholder="admin@email.com">
+        <label class="form-label" for="admin-senha">Senha</label>
+        <input type="password" id="admin-senha" class="form-input" placeholder="••••••••">
+        <button class="btn-entrar" id="btn-login-admin">Entrar</button>
+      </div>
+    </div>
+
+    <!-- Logado -->
+    <div id="area-logado" class="oculto">
+      <div class="painel-logado">
+        <div class="painel-top">
+          <div>
+            <h3>📊 Painel de controle</h3>
+            <div class="painel-email" id="admin-email-display"></div>
+          </div>
+          <button class="btn-sair" id="btn-logout">Sair</button>
+        </div>
+
+        <!-- Stats -->
+        <div class="admin-stats">
+          <div class="admin-stat-card">
+            <div class="num" id="admin-stat-total">0</div>
+            <div class="lbl">Reservas</div>
+          </div>
+          <div class="admin-stat-card">
+            <div class="num" id="admin-stat-confirmados">0</div>
+            <div class="lbl">Confirmados</div>
+          </div>
+          <div class="admin-stat-card">
+            <div class="num" id="admin-stat-pendentes">0</div>
+            <div class="lbl">Pendentes</div>
+          </div>
+        </div>
+
+        <!-- Criar usuário -->
+        <div class="criar-usuario-section">
+          <div class="criar-usuario-header" onclick="document.getElementById('form-criar-usuario').classList.toggle('oculto')">
+            <h4>➕ Adicionar administrador</h4>
+            <span style="font-size:.8rem;color:var(--marrom-claro)">▾</span>
+          </div>
+          <div id="form-criar-usuario" class="oculto">
+            <label class="form-label" for="novo-email">E-mail do novo admin</label>
+            <input type="email" id="novo-email" class="form-input" placeholder="novoadmin@email.com">
+            <label class="form-label" for="nova-senha">Senha (mín. 6 caracteres)</label>
+            <input type="password" id="nova-senha" class="form-input" placeholder="••••••••">
+            <button class="btn-criar" id="btn-criar-usuario">Criar usuário</button>
+          </div>
+        </div>
+
+        <!-- Tabela -->
+        <div class="table-actions">
+          <button class="btn-exportar" onclick="window.exportarCSV()">⬇ Exportar CSV</button>
+        </div>
+
+        <div class="table-wrap">
+          <table class="admin-table">
+            <thead>
+              <tr>
+                <th>Números</th>
+                <th>Nome</th>
+                <th>WhatsApp</th>
+                <th>Total</th>
+                <th>Data</th>
+                <th>Comprovou</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="admin-tbody">
+              <tr><td colspan="7" style="text-align:center;padding:2rem;opacity:.5">Carregando...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- FOOTER -->
+<div class="footer">
+  <p>🐾 Clube Dachshund Bauru · Rifa Solidária 2026</p>
+</div>
+
+<!-- TOAST -->
+<div class="toast" id="toast"></div>
+
+</body>
+</html>
